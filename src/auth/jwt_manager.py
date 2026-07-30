@@ -30,6 +30,8 @@ logger = setup_logger("jwt")
 # ─────────────────────────────────────────────
 # Garena OAuth constants (from TCP bot)
 # ─────────────────────────────────────────────
+# Try v2 first, fall back to v1
+OAUTH_URL_V2 = "https://ffmconnect.live.gop.garenanow.com/api/v2/oauth/guest/token:grant"
 GARENA_OAUTH_URL = "https://100067.connect.garena.com/oauth/guest/token/grant"
 GARENA_MAJOR_LOGIN_URLS = [
     "https://loginbp.ggpolarbear.com/MajorLogin",
