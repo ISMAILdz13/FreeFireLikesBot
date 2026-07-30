@@ -183,8 +183,8 @@ class JWTCredentials:
         self.server_url  = server_url
         self.created_at  = created_at
         self.expires_at  = expires_at
-        self.session_key = session_key   # per-session AES key from MajorLoginRes.ak
-        self.session_iv  = session_iv    # per-session AES IV from MajorLoginRes.aiv
+        self.session_key = session_key   # per-session AES key from MajorLoginRes.key
+        self.session_iv  = session_iv    # per-session AES IV from MajorLoginRes.iv
 
 
 class JWTManager:
@@ -369,11 +369,11 @@ class JWTManager:
                 logger.error(f"MajorLogin empty token for {uid}")
                 return None
 
-            session_key = ml_resp.ak if ml_resp.ak else None
-            session_iv  = ml_resp.aiv if ml_resp.aiv else None
+            session_key = ml_resp.key if ml_resp.key else None
+            session_iv  = ml_resp.iv if ml_resp.iv else None
 
             lock_region = ml_resp.lock_region or ml_resp.noti_region or region
-            server_url  = ml_resp.server_url or REGION_API_BASE.get(region, "https://clientbp.ggpolarbear.com")
+            server_url  = ml_resp.url or REGION_API_BASE.get(region, "https://clientbp.ggpolarbear.com")
 
             decoded = await self.decode(jwt_token)
             if decoded and "exp" in decoded:
