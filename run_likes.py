@@ -131,7 +131,7 @@ def main():
     p.add_argument("--target", type=int, required=True, help="Target UID to send likes to")
     p.add_argument("--count", type=int, default=15, help="Total likes to send (default: 15)")
     p.add_argument("--region", type=str, default="ME", help="Region (default: ME)")
-    p.add_argument("--per-guest", type=int, default=3, help="Max likes per guest (default: 3)")
+    p.add_argument("--per-guest", type=int, default=1, help="Max likes per guest (default: 1 — FF limits 1 like/account/24h)")
     args = p.parse_args()
 
     with open(GUESTS_FILE) as f:
@@ -155,8 +155,30 @@ def main():
         uid = guest["uid"]
         print(f"\n[Guest {i+1}] UID: {uid}")
 
+        # Refresh OAuth token (tokens expire)
+        try:
+            resp = requests.post(
+                "https://ffmconnect.live.gop.garenanow.com/api/v2/oauth/guest/token:grant",
+                headers={"User-Agent": "GarenaMSDK/4.0.19P10(I2404 ;Android 15;en;US;)",
+                         "Content-Type": "application/json; charset=utf-8"},
+                json={"client_id": 100067,
+                      "client_secret": "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3",
+                      "client_type": 2, "password": guest["password"],
+                      "response_type": "token", "uid": int(uid)},
+                timeout=15, verify=False)
+            odata = resp.json().get("data", resp.json())
+            access_token = odata["access_token"]
+            open_id = odata["open_id"]
+            guest["access_token"] = access_token
+            guest["open_id"] = open_id
+            print(f"  OAuth refreshed ✓")
+        except Exception as e:
+            print(f"  OAuth FAIL: {e} — trying stored token")
+            access_token = guest["access_token"]
+            open_id = guest["open_id"]
+
         # MajorLogin
-        payload = build_login(guest["open_id"], guest["access_token"])
+        payload = build_login(open_id, access_token)
         try:
             resp = requests.post("https://loginbp.ggpolarbear.com/MajorLogin",
                 headers={**HEADERS, "Authorization": f"Bearer {guest['access_token']}"},
