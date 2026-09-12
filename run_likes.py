@@ -49,6 +49,36 @@ HEADERS = {
 
 GUESTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "guests.json")
 
+LIKE_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "like_history.json")
+LIKE_COOLDOWN = 24 * 60 * 60  # FF allows 1 like per guest per target, resets every 24h
+
+def load_history():
+    try:
+        with open(LIKE_HISTORY_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_history(history):
+    os.makedirs(os.path.dirname(LIKE_HISTORY_FILE), exist_ok=True)
+    with open(LIKE_HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=2)
+
+def cooldown_left(history, guest_uid, target_uid):
+    """Return remaining cooldown string if guest already liked target in last 24h, else None."""
+    ts = history.get(str(guest_uid), {}).get(str(target_uid))
+    if not ts:
+        return None
+    elapsed = (datetime.utcnow() - datetime.fromisoformat(ts)).total_seconds()
+    if elapsed < LIKE_COOLDOWN:
+        h, rem = divmod(int(LIKE_COOLDOWN - elapsed), 3600)
+        return f"{h}h {rem // 60}m"
+    return None
+
+def record_like(history, guest_uid, target_uid):
+    history.setdefault(str(guest_uid), {})[str(target_uid)] = datetime.utcnow().isoformat()
+    save_history(history)
+
 # ======================== HELPERS ========================
 
 def encode_varint(n):
@@ -141,12 +171,16 @@ def main():
     with open(GUESTS_FILE) as f:
         guests = json.load(f)
 
+    history = load_history()
+    fresh = [g for g in guests if not cooldown_left(history, g["uid"], args.target)]
+    skipped = 0
+
     print("=" * 50)
     print("  FREE FIRE LIKE BOT")
     print(f"  Target: {args.target}")
     print(f"  Likes: {args.count}")
     print(f"  Region: {args.region}")
-    print(f"  Guests: {len(guests)}")
+    print(f"  Guests: {len(guests)} ({len(fresh)} fresh, {len(guests) - len(fresh)} on 24h cooldown)")
     print("=" * 50)
 
     likes_sent = 0
@@ -158,6 +192,13 @@ def main():
 
         uid = guest["uid"]
         print(f"\n[Guest {i+1}] UID: {uid}")
+
+        # FF rule: 1 like per guest per target per 24h — don't waste the OAuth call
+        wait = cooldown_left(history, uid, args.target)
+        if wait:
+            skipped += 1
+            print(f"  Already liked this target — cooldown resets in {wait}. Skipped.")
+            continue
 
         # Refresh OAuth token (tokens expire)
         try:
@@ -209,6 +250,7 @@ def main():
                     likes_sent += 1
                     likes_this_guest += 1
                     print(f"  [{likes_this_guest}/{args.per_guest}] Like sent! ({likes_sent}/{args.count} total)")
+                    record_like(history, uid, args.target)
                 else:
                     print(f"  [{j+1}/{args.per_guest}] FAIL: HTTP {status}")
                 time.sleep(3)
@@ -219,6 +261,8 @@ def main():
     print(f"\n{'='*50}")
     print(f"  RESULT: {likes_sent}/{args.count} likes sent")
     print(f"  Target: UID {args.target}")
+    if skipped:
+        print(f"  Skipped: {skipped} guests (already liked, 24h cooldown)")
     print(f"{'='*50}")
 
 if __name__ == "__main__":
