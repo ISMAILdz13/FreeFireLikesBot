@@ -13,7 +13,7 @@ Requirements:
 """
 
 import sys, os, json, argparse, time, random
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add paths
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src", "proto", "compiled"))
@@ -27,9 +27,24 @@ from like_count_pb2 import Info as LikeCountInfo
 from dev_generator_pb2 import dev_generator
 from data_pb2 import AccountPersonalShowInfo
 
+def utcnow():
+    """Timezone-naive UTC now — utcnow() is deprecated on Python 3.12+."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 # Silence the 'Unverified HTTPS request' spam (Garena endpoints use verify=False)
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ANSI colors (Segoe UI not required — works with any Termux font)
+class C:
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    GREEN   = "\033[92m"
+    YELLOW  = "\033[93m"
+    RED     = "\033[91m"
+    CYAN    = "\033[96m"
+    MAGENTA = "\033[95m"
+    DIM     = "\033[2m"
 
 # ======================== CONFIG ========================
 AES_KEY = b'Yg&tc%DEuh6%Zc^8'
@@ -63,7 +78,7 @@ def load_history():
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
     # Prune entries older than the 24h cooldown — keeps the file tiny forever
-    pruned, now = {}, datetime.utcnow()
+    pruned, now = {}, utcnow()
     for g, targets in history.items():
         for t, ts in targets.items():
             try:
@@ -103,14 +118,14 @@ def cooldown_left(history, guest_uid, target_uid):
     ts = history.get(str(guest_uid), {}).get(str(target_uid))
     if not ts:
         return None
-    elapsed = (datetime.utcnow() - datetime.fromisoformat(ts)).total_seconds()
+    elapsed = (utcnow() - datetime.fromisoformat(ts)).total_seconds()
     if elapsed < LIKE_COOLDOWN:
         h, rem = divmod(int(LIKE_COOLDOWN - elapsed), 3600)
         return f"{h}h {rem // 60}m"
     return None
 
 def record_like(history, guest_uid, target_uid):
-    history.setdefault(str(guest_uid), {})[str(target_uid)] = datetime.utcnow().isoformat()
+    history.setdefault(str(guest_uid), {})[str(target_uid)] = utcnow().isoformat()
     save_history(history)
 
 # ======================== HELPERS ========================
@@ -240,10 +255,10 @@ def guest_jwt(guest):
         odata = resp.json().get("data", resp.json())
         guest["access_token"] = odata["access_token"]
         guest["open_id"] = odata["open_id"]
-        print(f"  OAuth refreshed \u2713")
+        print(f"  {C.GREEN}OAuth refreshed \u2713{C.RESET}")
     except Exception as e:
         if "access_token" not in guest:
-            print(f"  OAuth FAIL: {e}")
+            print(f"  {C.RED}OAuth FAIL: {e}{C.RESET}")
             return None
         print(f"  OAuth FAIL: {e} \u2014 using stored token")
     try:
@@ -251,11 +266,11 @@ def guest_jwt(guest):
             headers={**HEADERS, "Authorization": f"Bearer {guest['access_token']}"},
             data=build_login(guest["open_id"], guest["access_token"]), timeout=20)
         if resp.status_code != 200:
-            print(f"  MajorLogin FAIL: HTTP {resp.status_code}")
+            print(f"  {C.RED}MajorLogin FAIL: HTTP {resp.status_code}{C.RESET}")
             return None
         res = MajorLoginRes()
         res.ParseFromString(resp.content)
-        print(f"  JWT OK")
+        print(f"  {C.GREEN}JWT OK{C.RESET}")
         return res.token
     except Exception as e:
         print(f"  MajorLogin error: {e}")
@@ -275,15 +290,16 @@ def send_likes_flow(target, count, region, per_guest=1):
     likes_sent = 0
     before_likes = None
     last_jwt = None
+    debug_dumped = False
 
     print("=" * 50)
-    print("  FREE FIRE LIKE BOT")
+    print(f"{C.CYAN}{C.BOLD}  FREE FIRE LIKE BOT{C.RESET}")
     print(f"  Target: {target}")
     print(f"  Likes: {count}")
     print(f"  Region: {region}")
     print(f"  Guests: {len(guests)} ({len(fresh)} fresh, {len(guests) - len(fresh)} on 24h cooldown)")
     if len(fresh) < count:
-        print(f"  \u26a0 Only {len(fresh)} fresh guests for {count} likes — run will fall short")
+        print(f"  {C.YELLOW}\u26a0 Only {len(fresh)} fresh guests for {count} likes — run will fall short{C.RESET}")
     print("=" * 50)
 
     for i, guest in enumerate(guests):
@@ -297,7 +313,7 @@ def send_likes_flow(target, count, region, per_guest=1):
         wait = cooldown_left(history, uid, target)
         if wait:
             skipped += 1
-            print(f"  Already liked this target — cooldown resets in {wait}. Skipped.")
+            print(f"  {C.YELLOW}Already liked this target — cooldown resets in {wait}. Skipped.{C.RESET}")
             continue
 
         if guest.get("status") == "dead":
@@ -322,7 +338,7 @@ def send_likes_flow(target, count, region, per_guest=1):
             info = fetch_info(jwt, target)
             if info:
                 before_likes = info["likes"]
-                print(f"  LIVE: {info['nickname']} (Lv.{info['level']}, {info['region']}) — likes now: {info['likes']:,}")
+                print(f"  {C.MAGENTA}LIVE: {info['nickname']} (Lv.{info['level']}, {info['region']}) — likes now: {info['likes']:,}{C.RESET}")
 
         likes_this_guest = 0
         for j in range(per_guest):
@@ -344,6 +360,12 @@ def send_likes_flow(target, count, region, per_guest=1):
                         live = lc.AccountInfo.Likes
                     except Exception:
                         pass
+                    if live == 0:
+                        # 200 OK but zero count = server returned an empty body — like likely dropped
+                        live = None
+                        if not debug_dumped:
+                            debug_dumped = True
+                            print(f"  {C.DIM}debug: LikeProfile resp {len(raw)} bytes: {raw[:48].hex()}{C.RESET}")
                     extra = f" \u2014 target likes now: {live:,}" if live is not None else ""
                     print(f"  [{likes_this_guest}/{per_guest}] Like sent! ({likes_sent}/{count} total){extra}")
                     record_like(history, uid, target)
@@ -363,17 +385,23 @@ def send_likes_flow(target, count, region, per_guest=1):
         after = fetch_info(last_jwt, target)
         if after:
             after_likes = after["likes"]
-            if before_likes is not None:
-                gained = after_likes - before_likes
-                if gained >= likes_sent:
-                    verdict = "COUNTED \u2713"
-                elif gained > 0:
-                    verdict = f"PARTIAL ({gained}/{likes_sent})"
-                else:
-                    verdict = "NOT COUNTED YET (may take a few min)"
-                print(f"  LIVE VERIFY: {before_likes:,} \u2192 {after_likes:,} likes ({gained:+d}) — {verdict}")
+            if before_likes is not None and after_likes - before_likes == 0:
+                print(f"  {C.DIM}count still flat — waiting 15s and re-checking (Garena counts can lag)...{C.RESET}")
+                time.sleep(15)
+                again = fetch_info(last_jwt, target)
+                if again:
+                    after_likes = again["likes"]
+        if after_likes is not None and before_likes is not None:
+            gained = after_likes - before_likes
+            if gained >= likes_sent:
+                verdict = f"{C.GREEN}COUNTED \u2713{C.RESET}"
+            elif gained > 0:
+                verdict = f"{C.YELLOW}PARTIAL ({gained}/{likes_sent}){C.RESET}"
             else:
-                print(f"  LIVE VERIFY: target now at {after_likes:,} likes")
+                verdict = f"{C.RED}NOT COUNTED \u2717 \u2014 accounts may be too new (Garena drops likes from fresh accounts){C.RESET}"
+            print(f"  LIVE VERIFY: {before_likes:,} \u2192 {after_likes:,} likes ({gained:+d}) — {verdict}")
+        elif after_likes is not None:
+            print(f"  LIVE VERIFY: target now at {after_likes:,} likes")
         else:
             print("  LIVE VERIFY: final fetch failed")
     if dead_skipped:
@@ -410,7 +438,7 @@ def check_uid_info(target):
     print(f"  Nickname : {info['nickname']}")
     print(f"  Level    : {info['level']}")
     print(f"  Region   : {info['region']}")
-    print(f"  Likes    : {info['likes']:,}")
+    print(f"  {C.MAGENTA}Likes    : {info['likes']:,}{C.RESET}")
     print("=" * 40)
 
 
@@ -423,9 +451,9 @@ def cooldown_status(target):
     for g in guests:
         w = cooldown_left(history, g["uid"], target)
         if w:
-            print(f"  {g['uid']:<14} liked — resets in {w}")
+            print(f"  {C.YELLOW}{g['uid']:<14} liked \u2014 resets in {w}{C.RESET}")
         else:
-            print(f"  {g['uid']:<14} FRESH")
+            print(f"  {C.GREEN}{g['uid']:<14} FRESH{C.RESET}")
             fresh += 1
     print(f"\n  Fresh: {fresh}/{len(guests)}")
 
@@ -455,14 +483,14 @@ def reset_dead():
 def menu():
     while True:
         print("\n" + "=" * 50)
-        print("  FREE FIRE LIKE BOT \u2014 MENU")
+        print(f"{C.CYAN}{C.BOLD}  FREE FIRE LIKE BOT \u2014 MENU{C.RESET}")
         print("=" * 50)
-        print("  [1] Send likes to a UID")
-        print("  [2] Check a UID (live info + likes)")
-        print("  [3] Show 24h cooldown status for a UID")
-        print("  [4] View recent runs")
-        print("  [5] Reset dead-account flags")
-        print("  [6] Exit")
+        print(f"  {C.CYAN}[1] Send likes to a UID{C.RESET}")
+        print(f"  {C.CYAN}[2] Check a UID (live info + likes){C.RESET}")
+        print(f"  {C.CYAN}[3] Show 24h cooldown status for a UID{C.RESET}")
+        print(f"  {C.CYAN}[4] View recent runs{C.RESET}")
+        print(f"  {C.CYAN}[5] Reset dead-account flags{C.RESET}")
+        print(f"  {C.CYAN}[6] Exit{C.RESET}")
         try:
             choice = input("\n  Choose [1-6]: ").strip()
         except (EOFError, KeyboardInterrupt):
