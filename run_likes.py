@@ -22,6 +22,9 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 from MajoRLoGinrEq_pb2 import MajorLogin
 from MajoRLoGinrEs_pb2 import MajorLoginRes
+from like_count_pb2 import Info as LikeCountInfo
+from dev_generator_pb2 import dev_generator
+from data_pb2 import AccountPersonalShowInfo
 
 # Silence the 'Unverified HTTPS request' spam (Garena endpoints use verify=False)
 import urllib3
@@ -156,35 +159,98 @@ def send_like(jwt, target_uid, region="ME"):
     resp = requests.post("https://clientbp.ggpolarbear.com/LikeProfile",
         headers={**HEADERS, "Authorization": f"Bearer {jwt}"},
         data=enc, timeout=15)
-    return resp.status_code
+    return resp.status_code, resp.content
+
+def fetch_info(jwt, target_uid):
+    """Live fetch: nickname, level, region and LIKES of any UID (GetPlayerPersonalShow)."""
+    msg = dev_generator()
+    msg.saturn_ = int(target_uid)
+    msg.garena = 1
+    enc = AES.new(AES_KEY, AES.MODE_CBC, AES_IV).encrypt(pad(msg.SerializeToString(), 16))
+    info_headers = {
+        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; ASUS_Z01QD Build/PI)",
+        "Connection": "Keep-Alive",
+        "Accept-Encoding": "gzip",
+        "Authorization": f"Bearer {jwt}",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Unity-Version": "2018.4.11f1",
+        "X-GA": "v1 1",
+        "ReleaseVersion": "OB54",
+    }
+    try:
+        resp = requests.post("https://clientbp.ggpolarbear.com/GetPlayerPersonalShow",
+            headers=info_headers, data=enc, timeout=15)
+    except Exception as e:
+        print(f"  Live fetch error: {e}")
+        return None
+    if resp.status_code != 200 or len(resp.content) < 10:
+        return None
+    try:
+        info = AccountPersonalShowInfo()
+        info.ParseFromString(resp.content)
+        b = info.basic_info
+        return {"nickname": b.nickname, "level": b.level,
+                "likes": b.liked, "region": b.region}
+    except Exception:
+        return None
+
+def guest_jwt(guest):
+    """Authenticate one guest: OAuth refresh -> MajorLogin. Returns JWT or None."""
+    try:
+        resp = requests.post(
+            "https://ffmconnect.live.gop.garenanow.com/api/v2/oauth/guest/token:grant",
+            headers={"User-Agent": "GarenaMSDK/4.0.19P10(I2404 ;Android 15;en;US;)",
+                     "Content-Type": "application/json; charset=utf-8"},
+            json={"client_id": 100067,
+                  "client_secret": "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3",
+                  "client_type": 2, "password": guest["password"],
+                  "response_type": "token", "uid": int(guest["uid"])},
+            timeout=15, verify=False)
+        odata = resp.json().get("data", resp.json())
+        guest["access_token"] = odata["access_token"]
+        guest["open_id"] = odata["open_id"]
+        print(f"  OAuth refreshed \u2713")
+    except Exception as e:
+        if "access_token" not in guest:
+            print(f"  OAuth FAIL: {e}")
+            return None
+        print(f"  OAuth FAIL: {e} \u2014 using stored token")
+    try:
+        resp = requests.post("https://loginbp.ggpolarbear.com/MajorLogin",
+            headers={**HEADERS, "Authorization": f"Bearer {guest['access_token']}"},
+            data=build_login(guest["open_id"], guest["access_token"]), timeout=20)
+        if resp.status_code != 200:
+            print(f"  MajorLogin FAIL: HTTP {resp.status_code}")
+            return None
+        res = MajorLoginRes()
+        res.ParseFromString(resp.content)
+        print(f"  JWT OK")
+        return res.token
+    except Exception as e:
+        print(f"  MajorLogin error: {e}")
+        return None
 
 # ======================== MAIN ========================
 
-def main():
-    p = argparse.ArgumentParser(description="Free Fire Like Bot")
-    p.add_argument("--target", type=int, required=True, help="Target UID to send likes to")
-    p.add_argument("--count", type=int, default=15, help="Total likes to send (default: 15)")
-    p.add_argument("--region", type=str, default="ME", help="Region (default: ME)")
-    p.add_argument("--per-guest", type=int, default=1, help="Max likes per guest (default: 1 — FF limits 1 like/account/24h)")
-    args = p.parse_args()
-
+def send_likes_flow(target, count, region, per_guest=1):
     with open(GUESTS_FILE) as f:
         guests = json.load(f)
 
     history = load_history()
-    fresh = [g for g in guests if not cooldown_left(history, g["uid"], args.target)]
+    fresh = [g for g in guests if not cooldown_left(history, g["uid"], target)]
     skipped = 0
+    likes_needed = count
+    likes_sent = 0
+    before_likes = None
+    last_jwt = None
 
     print("=" * 50)
     print("  FREE FIRE LIKE BOT")
-    print(f"  Target: {args.target}")
-    print(f"  Likes: {args.count}")
-    print(f"  Region: {args.region}")
+    print(f"  Target: {target}")
+    print(f"  Likes: {count}")
+    print(f"  Region: {region}")
     print(f"  Guests: {len(guests)} ({len(fresh)} fresh, {len(guests) - len(fresh)} on 24h cooldown)")
     print("=" * 50)
-
-    likes_sent = 0
-    likes_needed = args.count
 
     for i, guest in enumerate(guests):
         if likes_sent >= likes_needed:
@@ -194,77 +260,164 @@ def main():
         print(f"\n[Guest {i+1}] UID: {uid}")
 
         # FF rule: 1 like per guest per target per 24h — don't waste the OAuth call
-        wait = cooldown_left(history, uid, args.target)
+        wait = cooldown_left(history, uid, target)
         if wait:
             skipped += 1
             print(f"  Already liked this target — cooldown resets in {wait}. Skipped.")
             continue
 
-        # Refresh OAuth token (tokens expire)
-        try:
-            resp = requests.post(
-                "https://ffmconnect.live.gop.garenanow.com/api/v2/oauth/guest/token:grant",
-                headers={"User-Agent": "GarenaMSDK/4.0.19P10(I2404 ;Android 15;en;US;)",
-                         "Content-Type": "application/json; charset=utf-8"},
-                json={"client_id": 100067,
-                      "client_secret": "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3",
-                      "client_type": 2, "password": guest["password"],
-                      "response_type": "token", "uid": int(uid)},
-                timeout=15, verify=False)
-            odata = resp.json().get("data", resp.json())
-            access_token = odata["access_token"]
-            open_id = odata["open_id"]
-            guest["access_token"] = access_token
-            guest["open_id"] = open_id
-            print(f"  OAuth refreshed ✓")
-        except Exception as e:
-            print(f"  OAuth FAIL: {e} — trying stored token")
-            access_token = guest["access_token"]
-            open_id = guest["open_id"]
-
-        # MajorLogin
-        payload = build_login(open_id, access_token)
-        try:
-            resp = requests.post("https://loginbp.ggpolarbear.com/MajorLogin",
-                headers={**HEADERS, "Authorization": f"Bearer {guest['access_token']}"},
-                data=payload, timeout=20)
-            if resp.status_code != 200:
-                print(f"  MajorLogin FAIL: HTTP {resp.status_code}")
-                continue
-            res = MajorLoginRes()
-            res.ParseFromString(resp.content)
-            jwt = res.token
-            print(f"  JWT OK")
-        except Exception as e:
-            print(f"  MajorLogin error: {e}")
+        jwt = guest_jwt(guest)
+        if not jwt:
+            print("  Skipping guest.")
             continue
+        last_jwt = jwt
 
-        # Send likes
+        # Live check on the target before liking (uses first working guest)
+        if before_likes is None:
+            info = fetch_info(jwt, target)
+            if info:
+                before_likes = info["likes"]
+                print(f"  LIVE: {info['nickname']} (Lv.{info['level']}, {info['region']}) — likes now: {info['likes']:,}")
+
         likes_this_guest = 0
-        for j in range(args.per_guest):
+        for j in range(per_guest):
             if likes_sent >= likes_needed:
                 break
             try:
-                status = send_like(jwt, args.target, args.region)
+                status, raw = send_like(jwt, target, region)
                 if status == 200:
                     likes_sent += 1
                     likes_this_guest += 1
-                    print(f"  [{likes_this_guest}/{args.per_guest}] Like sent! ({likes_sent}/{args.count} total)")
-                    record_like(history, uid, args.target)
+                    live = None
+                    try:
+                        lc = LikeCountInfo()
+                        lc.ParseFromString(raw)
+                        live = lc.AccountInfo.Likes
+                    except Exception:
+                        pass
+                    extra = f" \u2014 target likes now: {live:,}" if live is not None else ""
+                    print(f"  [{likes_this_guest}/{per_guest}] Like sent! ({likes_sent}/{count} total){extra}")
+                    record_like(history, uid, target)
                 else:
-                    print(f"  [{j+1}/{args.per_guest}] FAIL: HTTP {status}")
+                    print(f"  [{j+1}/{per_guest}] FAIL: HTTP {status}")
                 time.sleep(3)
             except Exception as e:
                 print(f"  Error: {e}")
                 time.sleep(2)
 
+    # Final live verification — did the server actually count the likes?
     print(f"\n{'='*50}")
-    print(f"  RESULT: {likes_sent}/{args.count} likes sent")
-    print(f"  Target: UID {args.target}")
+    print(f"  RESULT: {likes_sent}/{count} likes sent")
+    print(f"  Target: UID {target}")
+    if likes_sent and last_jwt:
+        after = fetch_info(last_jwt, target)
+        if after and before_likes is not None:
+            gained = after["likes"] - before_likes
+            if gained >= likes_sent:
+                verdict = "COUNTED \u2713"
+            elif gained > 0:
+                verdict = f"PARTIAL ({gained}/{likes_sent})"
+            else:
+                verdict = "NOT COUNTED YET (may take a few min)"
+            print(f"  LIVE VERIFY: {before_likes:,} \u2192 {after['likes']:,} likes ({gained:+d}) — {verdict}")
+        elif after:
+            print(f"  LIVE VERIFY: target now at {after['likes']:,} likes")
+        else:
+            print("  LIVE VERIFY: final fetch failed")
     if skipped:
         print(f"  Skipped: {skipped} guests (already liked, 24h cooldown)")
-    print(f"{'='*50}")
+    print("=" * 50)
+
+
+def check_uid_info(target):
+    with open(GUESTS_FILE) as f:
+        guests = json.load(f)
+    if not guests:
+        print("No guest accounts available.")
+        return
+    print(f"\nFetching live info for UID {target}...")
+    jwt = None
+    for guest in guests[:3]:
+        print(f"[Auth] guest {guest['uid']}")
+        jwt = guest_jwt(guest)
+        if jwt:
+            break
+    if not jwt:
+        print("Could not authenticate any guest.")
+        return
+    info = fetch_info(jwt, target)
+    if not info:
+        print("Fetch failed — UID may be wrong or hidden.")
+        return
+    print("=" * 40)
+    print(f"  Nickname : {info['nickname']}")
+    print(f"  Level    : {info['level']}")
+    print(f"  Region   : {info['region']}")
+    print(f"  Likes    : {info['likes']:,}")
+    print("=" * 40)
+
+
+def cooldown_status(target):
+    with open(GUESTS_FILE) as f:
+        guests = json.load(f)
+    history = load_history()
+    print(f"\n24h cooldown status for target {target}:")
+    fresh = 0
+    for g in guests:
+        w = cooldown_left(history, g["uid"], target)
+        if w:
+            print(f"  {g['uid']:<14} liked — resets in {w}")
+        else:
+            print(f"  {g['uid']:<14} FRESH")
+            fresh += 1
+    print(f"\n  Fresh: {fresh}/{len(guests)}")
+
+
+def menu():
+    while True:
+        print("\n" + "=" * 50)
+        print("  FREE FIRE LIKE BOT \u2014 MENU")
+        print("=" * 50)
+        print("  [1] Send likes to a UID")
+        print("  [2] Check a UID (live info + likes)")
+        print("  [3] Show 24h cooldown status for a UID")
+        print("  [4] Exit")
+        try:
+            choice = input("\n  Choose [1-4]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Bye o/")
+            break
+        try:
+            if choice == "1":
+                target = int(input("  Target UID: ").strip())
+                count = int(input("  Likes to send [20]: ").strip() or 20)
+                region = (input("  Region [ME]: ").strip() or "ME").upper()
+                send_likes_flow(target, count, region)
+            elif choice == "2":
+                check_uid_info(int(input("  UID to check: ").strip()))
+            elif choice == "3":
+                cooldown_status(int(input("  Target UID: ").strip()))
+            elif choice == "4":
+                print("  Bye o/")
+                break
+            else:
+                print("  Pick 1-4.")
+        except ValueError:
+            print("  Invalid number.")
+
+
+def main():
+    if len(sys.argv) > 1:
+        p = argparse.ArgumentParser(description="Free Fire Like Bot")
+        p.add_argument("--target", type=int, required=True, help="Target UID to send likes to")
+        p.add_argument("--count", type=int, default=15, help="Total likes to send (default: 15)")
+        p.add_argument("--region", type=str, default="ME", help="Region (default: ME)")
+        p.add_argument("--per-guest", type=int, default=1, help="Max likes per guest (default: 1 — FF limits 1 like/account/24h)")
+        args = p.parse_args()
+        send_likes_flow(args.target, args.count, args.region, args.per_guest)
+    else:
+        menu()
+
 
 if __name__ == "__main__":
     main()
-
