@@ -259,3 +259,13 @@ MIT License — see [LICENSE](LICENSE) file.
 <div align="center">
 <sub>⭐ Star this repo if it helps you</sub>
 </div>
+
+## Like Route Tester (phone/network diagnostic)
+
+Some Garena like clusters are geo-gated: they ignore cloud/datacenter IPs but answer from local mobile IPs. This tester checks every known route **from your own network** and tells you exactly which one delivers real likes:
+
+```bash
+python3 tools/test_like_routes.py [TARGET_UID]
+```
+
+It logs in with a guest, reads the target's like count, fires one like over every route (all clusters, static + session encryption), then re-reads the count and prints a clear verdict. If it counts — send the output to the agent so the bot gets pointed at that route permanently.
