@@ -23,6 +23,10 @@ from Crypto.Util.Padding import pad
 from MajoRLoGinrEq_pb2 import MajorLogin
 from MajoRLoGinrEs_pb2 import MajorLoginRes
 
+# Silence the 'Unverified HTTPS request' spam (Garena endpoints use verify=False)
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # ======================== CONFIG ========================
 AES_KEY = b'Yg&tc%DEuh6%Zc^8'
 AES_IV  = b'6oyZDr22E3ychjM%'
@@ -219,3 +223,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
