@@ -5,6 +5,7 @@ Free Fire Like Bot — Termux Edition
 Sends likes to any Free Fire UID using guest accounts.
 
 Usage:
+  python3 run_likes.py                 (interactive menu)
   python3 run_likes.py --target <UID> [--count 15] [--region ME]
 
 Requirements:
@@ -58,14 +59,44 @@ LIKE_COOLDOWN = 24 * 60 * 60  # FF allows 1 like per guest per target, resets ev
 def load_history():
     try:
         with open(LIKE_HISTORY_FILE) as f:
-            return json.load(f)
+            history = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    # Prune entries older than the 24h cooldown — keeps the file tiny forever
+    pruned, now = {}, datetime.utcnow()
+    for g, targets in history.items():
+        for t, ts in targets.items():
+            try:
+                if (now - datetime.fromisoformat(ts)).total_seconds() < LIKE_COOLDOWN:
+                    pruned.setdefault(g, {})[t] = ts
+            except ValueError:
+                pass
+    return pruned
 
 def save_history(history):
     os.makedirs(os.path.dirname(LIKE_HISTORY_FILE), exist_ok=True)
     with open(LIKE_HISTORY_FILE, "w") as f:
         json.dump(history, f, indent=2)
+
+def save_guests(guests):
+    try:
+        with open(GUESTS_FILE, "w") as f:
+            json.dump(guests, f, indent=2)
+    except OSError as e:
+        print(f"  Could not save guests.json: {e}")
+
+RUNS_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "runs.log")
+
+def log_run(target, sent, requested, before, after):
+    try:
+        os.makedirs(os.path.dirname(RUNS_LOG), exist_ok=True)
+        with open(RUNS_LOG, "a") as f:
+            b = f"{before:,}" if before is not None else "?"
+            a = f"{after:,}" if after is not None else "?"
+            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M')} | target={target} "
+                    f"sent={sent}/{requested} | likes {b} -> {a}\n")
+    except OSError:
+        pass
 
 def cooldown_left(history, guest_uid, target_uid):
     """Return remaining cooldown string if guest already liked target in last 24h, else None."""
@@ -239,6 +270,7 @@ def send_likes_flow(target, count, region, per_guest=1):
     history = load_history()
     fresh = [g for g in guests if not cooldown_left(history, g["uid"], target)]
     skipped = 0
+    dead_skipped = 0
     likes_needed = count
     likes_sent = 0
     before_likes = None
@@ -250,6 +282,8 @@ def send_likes_flow(target, count, region, per_guest=1):
     print(f"  Likes: {count}")
     print(f"  Region: {region}")
     print(f"  Guests: {len(guests)} ({len(fresh)} fresh, {len(guests) - len(fresh)} on 24h cooldown)")
+    if len(fresh) < count:
+        print(f"  \u26a0 Only {len(fresh)} fresh guests for {count} likes — run will fall short")
     print("=" * 50)
 
     for i, guest in enumerate(guests):
@@ -266,10 +300,21 @@ def send_likes_flow(target, count, region, per_guest=1):
             print(f"  Already liked this target — cooldown resets in {wait}. Skipped.")
             continue
 
+        if guest.get("status") == "dead":
+            dead_skipped += 1
+            print(f"  Dead account (failed 2x) — skipped. Revive via menu [5].")
+            continue
+
         jwt = guest_jwt(guest)
         if not jwt:
+            fails = guest.get("fails", 0) + 1
+            guest["fails"] = fails
+            if fails >= 2:
+                guest["status"] = "dead"
+                print(f"  Marked DEAD (auth failed {fails}x)")
             print("  Skipping guest.")
             continue
+        guest["fails"] = 0
         last_jwt = jwt
 
         # Live check on the target before liking (uses first working guest)
@@ -285,6 +330,10 @@ def send_likes_flow(target, count, region, per_guest=1):
                 break
             try:
                 status, raw = send_like(jwt, target, region)
+                if status != 200:
+                    print(f"  [{j+1}/{per_guest}] FAIL: HTTP {status} — retrying once...")
+                    time.sleep(2)
+                    status, raw = send_like(jwt, target, region)
                 if status == 200:
                     likes_sent += 1
                     likes_this_guest += 1
@@ -300,7 +349,7 @@ def send_likes_flow(target, count, region, per_guest=1):
                     record_like(history, uid, target)
                 else:
                     print(f"  [{j+1}/{per_guest}] FAIL: HTTP {status}")
-                time.sleep(3)
+                time.sleep(random.uniform(2.5, 4.0))  # jitter — looks less bot-like
             except Exception as e:
                 print(f"  Error: {e}")
                 time.sleep(2)
@@ -309,23 +358,31 @@ def send_likes_flow(target, count, region, per_guest=1):
     print(f"\n{'='*50}")
     print(f"  RESULT: {likes_sent}/{count} likes sent")
     print(f"  Target: UID {target}")
+    after_likes = None
     if likes_sent and last_jwt:
         after = fetch_info(last_jwt, target)
-        if after and before_likes is not None:
-            gained = after["likes"] - before_likes
-            if gained >= likes_sent:
-                verdict = "COUNTED \u2713"
-            elif gained > 0:
-                verdict = f"PARTIAL ({gained}/{likes_sent})"
+        if after:
+            after_likes = after["likes"]
+            if before_likes is not None:
+                gained = after_likes - before_likes
+                if gained >= likes_sent:
+                    verdict = "COUNTED \u2713"
+                elif gained > 0:
+                    verdict = f"PARTIAL ({gained}/{likes_sent})"
+                else:
+                    verdict = "NOT COUNTED YET (may take a few min)"
+                print(f"  LIVE VERIFY: {before_likes:,} \u2192 {after_likes:,} likes ({gained:+d}) — {verdict}")
             else:
-                verdict = "NOT COUNTED YET (may take a few min)"
-            print(f"  LIVE VERIFY: {before_likes:,} \u2192 {after['likes']:,} likes ({gained:+d}) — {verdict}")
-        elif after:
-            print(f"  LIVE VERIFY: target now at {after['likes']:,} likes")
+                print(f"  LIVE VERIFY: target now at {after_likes:,} likes")
         else:
             print("  LIVE VERIFY: final fetch failed")
+    if dead_skipped:
+        print(f"  Dead accounts skipped: {dead_skipped} (revive via menu [5])")
     if skipped:
         print(f"  Skipped: {skipped} guests (already liked, 24h cooldown)")
+
+    save_guests(guests)
+    log_run(target, likes_sent, count, before_likes, after_likes)
     print("=" * 50)
 
 
@@ -373,6 +430,28 @@ def cooldown_status(target):
     print(f"\n  Fresh: {fresh}/{len(guests)}")
 
 
+def view_runs():
+    try:
+        with open(RUNS_LOG) as f:
+            lines = [l for l in f.read().strip().split("\n") if l]
+    except FileNotFoundError:
+        print("\n  No runs logged yet.")
+        return
+    print(f"\n  Last {min(len(lines), 10)} run(s):")
+    for l in lines[-10:]:
+        print("  " + l)
+
+def reset_dead():
+    with open(GUESTS_FILE) as f:
+        guests = json.load(f)
+    n = 0
+    for g in guests:
+        if g.get("status") == "dead" or g.get("fails"):
+            g["status"], g["fails"] = "ok", 0
+            n += 1
+    save_guests(guests)
+    print(f"  Revived {n} account flag(s).")
+
 def menu():
     while True:
         print("\n" + "=" * 50)
@@ -381,9 +460,11 @@ def menu():
         print("  [1] Send likes to a UID")
         print("  [2] Check a UID (live info + likes)")
         print("  [3] Show 24h cooldown status for a UID")
-        print("  [4] Exit")
+        print("  [4] View recent runs")
+        print("  [5] Reset dead-account flags")
+        print("  [6] Exit")
         try:
-            choice = input("\n  Choose [1-4]: ").strip()
+            choice = input("\n  Choose [1-6]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  Bye o/")
             break
@@ -398,6 +479,10 @@ def menu():
             elif choice == "3":
                 cooldown_status(int(input("  Target UID: ").strip()))
             elif choice == "4":
+                view_runs()
+            elif choice == "5":
+                reset_dead()
+            elif choice == "6":
                 print("  Bye o/")
                 break
             else:
