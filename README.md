@@ -269,3 +269,21 @@ python3 tools/test_like_routes.py [TARGET_UID]
 ```
 
 It logs in with a guest, reads the target's like count, fires one like over every route (all clusters, static + session encryption), then re-reads the count and prints a clear verdict. If it counts — send the output to the agent so the bot gets pointed at that route permanently.
+
+## Site Delivery Mode (RECOMMENDED — direct method is dead)
+
+Garena's anti-bot now silently drops direct HTTP like requests from every IP
+(verified from cloud + mobile networks). The bot therefore supports delivering
+through your own ff-like.noobs-api.top API:
+
+```bash
+# one-time: save your API key (from your dashboard -> API Keys)
+echo -n "noobs_XXXXYOURKEY" > data/site_api_key.txt
+
+# send 100 likes to a UID
+python3 run_likes.py --site --target 3476575559 --count 100
+
+# bigger packages: --count 120 or 220 (costs more API credits)
+```
+
+The response prints real before/after like counts — that IS the verification.
