@@ -526,11 +526,12 @@ def main():
         p.add_argument("--count", type=int, default=15, help="Total likes to send (default: 15)")
         p.add_argument("--region", type=str, default="ME", help="Region (default: ME)")
         p.add_argument("--per-guest", type=int, default=1, help="Max likes per guest (default: 1 — FF limits 1 like/account/24h)")
-        p.add_argument("--site", action="store_true", help="Deliver via your ff-like.noobs-api.top API key instead of direct Garena (recommended)")
+        p.add_argument("--site", action="store_true", help="Deliver via your ff-like.noobs-api.top backend instead of direct Garena (recommended)")
+        p.add_argument("--server", type=str, default="mena", help="Site delivery server: bd ind mena na pk id sg th (default: mena)")
         args = p.parse_args()
         if args.site:
             from site_delivery import site_flow
-            site_flow(args.target, args.count)
+            site_flow(args.target, args.count, args.server)
         else:
             send_likes_flow(args.target, args.count, args.region, args.per_guest)
     else:

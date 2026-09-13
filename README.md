@@ -287,3 +287,11 @@ python3 run_likes.py --site --target 3476575559 --count 100
 ```
 
 The response prints real before/after like counts — that IS the verification.
+
+## v2.4 — Site delivery via dashboard JWT (no API key needed!)
+`python3 run_likes.py --site --target <UID> --count 100 --server mena`
+
+- Auth: save your site JWT (from localStorage `ff_jwt_token` after Google login) to `data/site_jwt.txt` — Prime 1 account works, no API key required.
+- Falls back to `data/site_api_key.txt` (Prime 3 API key) automatically.
+- Servers: bd ind mena na pk id sg th (default: mena).
+- Dashboard route has a 100-likes/day per-UID limit — for more, create a **slot** in the site dashboard (100/120/220 likes per day for 15/30 days, delivered automatically server-side).

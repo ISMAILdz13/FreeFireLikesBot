@@ -17,3 +17,5 @@ dist/
 build/
 .venv/
 venv/
+data/site_jwt.txt
+data/site_api_key.txt
